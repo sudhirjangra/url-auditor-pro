@@ -72,7 +72,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 APP_NAME    = "URL Auditor Pro"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 DEVELOPER   = "Sudhir Jangra"
 
 SOFT_TIMEOUT = 20
