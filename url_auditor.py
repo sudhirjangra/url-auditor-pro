@@ -9,6 +9,7 @@ import sys
 import os
 import re
 import time
+import logging
 import webbrowser
 import threading
 import xml.etree.ElementTree as ET
@@ -23,6 +24,22 @@ from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.firefox.service import Service as FirefoxService
 from selenium.common.exceptions import WebDriverException, TimeoutException
+
+# ── Logging setup ──────────────────────────────────────────────────────────────
+
+def _get_log_path() -> str:
+    base = (os.path.dirname(sys.executable)
+            if getattr(sys, "frozen", False) else os.getcwd())
+    return os.path.join(base, "url_auditor_errors.log")
+
+logging.basicConfig(
+    filename=_get_log_path(),
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    encoding="utf-8",
+)
+log = logging.getLogger("url_auditor")
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -555,7 +572,7 @@ def get_driver_base() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
-def setup_chrome(headless: bool = True):
+def _chrome_opts(headless: bool) -> ChromeOptions:
     opts = ChromeOptions()
     opts.page_load_strategy = "eager"
     if headless:
@@ -564,13 +581,41 @@ def setup_chrome(headless: bool = True):
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
     opts.add_argument("--log-level=3")
+    return opts
+
+
+def setup_chrome(headless: bool = True):
+    opts = _chrome_opts(headless)
+    local_name = "chromedriver.exe" if os.name == "nt" else "chromedriver"
+    local_path = os.path.join(get_driver_base(), local_name)
+
+    # 1) Try local chromedriver next to the exe/script
+    if os.path.exists(local_path):
+        try:
+            svc = ChromeService(executable_path=local_path)
+            driver = webdriver.Chrome(service=svc, options=opts)
+            log.info("Chrome started via local driver: %s", local_path)
+            return driver
+        except Exception as e:
+            log.warning("Local chromedriver failed (%s): %s", local_path, e)
+
+    # 2) Try Selenium Manager (built into Selenium 4.6+, auto-downloads matching driver)
     try:
-        local = "chromedriver.exe" if os.name == "nt" else "chromedriver"
-        dp = os.path.join(get_driver_base(), local)
-        svc = ChromeService(executable_path=dp)
-        return webdriver.Chrome(service=svc, options=opts)
+        driver = webdriver.Chrome(options=opts)
+        log.info("Chrome started via Selenium Manager (auto-matched driver)")
+        return driver
     except Exception as e:
-        print(f"Chrome init error: {e}")
+        log.warning("Selenium Manager Chrome failed: %s", e)
+
+    # 3) Try webdriver-manager as last resort
+    try:
+        from webdriver_manager.chrome import ChromeDriverManager
+        svc = ChromeService(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=svc, options=opts)
+        log.info("Chrome started via webdriver-manager")
+        return driver
+    except Exception as e:
+        log.error("All Chrome driver strategies failed: %s", e)
         return None
 
 
@@ -579,15 +624,18 @@ def setup_firefox(headless: bool = True):
     opts.page_load_strategy = "eager"
     if headless:
         opts.add_argument("--headless")
+    local = "geckodriver.exe" if os.name == "nt" else "geckodriver"
+    dp = os.path.join(get_driver_base(), local)
+    if not os.path.exists(dp):
+        log.info("geckodriver not found at %s, skipping Firefox", dp)
+        return None
     try:
-        local = "geckodriver.exe" if os.name == "nt" else "geckodriver"
-        dp = os.path.join(get_driver_base(), local)
-        if not os.path.exists(dp):
-            return None
         svc = FirefoxService(executable_path=dp)
-        return webdriver.Firefox(service=svc, options=opts)
+        driver = webdriver.Firefox(service=svc, options=opts)
+        log.info("Firefox started via local driver: %s", dp)
+        return driver
     except Exception as e:
-        print(f"Firefox init error: {e}")
+        log.warning("Firefox init error: %s", e)
         return None
 
 
@@ -600,6 +648,7 @@ def selenium_check(url: str, driver, cf_signs: list, bad_titles: list) -> tuple[
     except TimeoutException:
         pass
     except Exception as e:
+        log.warning("selenium_check connection failed for %s: %s", url, e)
         return "Inactive", "", f"Connection failed: {str(e)[:60]}"
 
     start = time.time()
@@ -822,10 +871,19 @@ class AuditWorker(QThread):
         drv_firefox = None
 
         if not drv_chrome:
-            self.error.emit(
+            msg = (
                 "Chrome WebDriver failed to start.\n\n"
-                "Ensure chromedriver.exe is in the same folder as this app\n"
-                "and matches your installed Chrome version.")
+                "URL Auditor Pro tried three strategies in order:\n"
+                "  1. Local chromedriver.exe next to this app\n"
+                "  2. Selenium Manager (auto-match)\n"
+                "  3. webdriver-manager (auto-download)\n\n"
+                "All three failed. Check url_auditor_errors.log for details.\n\n"
+                "Quick fix: download chromedriver matching your Chrome version from\n"
+                "https://chromedriver.chromium.org/downloads\n"
+                "and place it next to this app."
+            )
+            log.error("Chrome WebDriver could not start — all strategies exhausted")
+            self.error.emit(msg)
             self.finished.emit()
             return
 
