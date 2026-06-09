@@ -27,19 +27,31 @@ from selenium.common.exceptions import WebDriverException, TimeoutException
 
 # ── Logging setup ──────────────────────────────────────────────────────────────
 
-def _get_log_path() -> str:
-    base = (os.path.dirname(sys.executable)
+def _get_log_base() -> str:
+    return (os.path.dirname(sys.executable)
             if getattr(sys, "frozen", False) else os.getcwd())
-    return os.path.join(base, "url_auditor_errors.log")
 
-logging.basicConfig(
-    filename=_get_log_path(),
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    encoding="utf-8",
-)
-log = logging.getLogger("url_auditor")
+
+def _init_logger() -> logging.Logger:
+    base = _get_log_base()
+    ts   = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    path = os.path.join(base, f"url_auditor_{ts}.log")
+
+    logger = logging.getLogger("url_auditor")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False  # suppress urllib3 / selenium noise from root logger
+
+    fh = logging.FileHandler(path, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    logger.addHandler(fh)
+    return logger
+
+
+log = _init_logger()
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -60,7 +72,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 APP_NAME    = "URL Auditor Pro"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 DEVELOPER   = "Sudhir Jangra"
 
 SOFT_TIMEOUT = 20
@@ -709,19 +721,28 @@ def selenium_check(url: str, driver, cf_signs: list, bad_titles: list) -> tuple[
 def dual_check(url: str, drv_chrome, drv_firefox, cf_signs: list,
                bad_titles: list, use_ff: bool) -> dict:
     sc, tc, mc = selenium_check(url, drv_chrome, cf_signs, bad_titles)
+
     if sc == "Active":
         return {"status": "Active", "title": tc, "notes": mc,
                 "verified": "Chrome", "method": "Chrome"}
-    if use_ff and drv_firefox:
+
+    # Only run Firefox fallback when Chrome reported Inactive (not driver Error)
+    if sc == "Inactive" and use_ff and drv_firefox:
+        log.info("   Chrome→Inactive, re-checking with Firefox: %s", url)
         sf, tf, mf = selenium_check(url, drv_firefox, cf_signs, bad_titles)
         if sf == "Active":
             return {"status": "Active", "title": tf,
-                    "notes": f"Chrome: {mc} | FF: Active",
+                    "notes": f"Chrome: {mc} | Firefox: Active",
                     "verified": "Firefox override", "method": "Firefox"}
+        # Both Inactive — trust the more descriptive reason
+        combined_notes = f"Chrome: {mc} | Firefox: {mf}"
         return {"status": "Inactive", "title": tf or tc,
-                "notes": f"Chrome: {mc} | FF: {mf}",
-                "verified": "Both browsers", "method": "Chrome + Firefox"}
-    return {"status": "Inactive", "title": tc, "notes": mc,
+                "notes": combined_notes,
+                "verified": "Both browsers confirmed", "method": "Chrome + Firefox"}
+
+    # Chrome Error (driver crash) or Firefox disabled
+    return {"status": sc if sc == "Inactive" else "Inactive",
+            "title": tc, "notes": mc,
             "verified": "Chrome only", "method": "Chrome"}
 
 
@@ -909,6 +930,8 @@ class AuditWorker(QThread):
                     f"[{i+1}/{total}]  {url[:80]}{'...' if len(url) > 80 else ''}")
                 self.progress.emit(i + 1, total)
 
+                log.info("── [%d/%d] %s", i + 1, total, url)
+
                 t0 = time.time()
                 if check_skip_domain(url, self.skip_domains):
                     res = {
@@ -918,6 +941,7 @@ class AuditWorker(QThread):
                         "method": "Skip Rule", "verified": "N/A",
                         "skipped": True, "time_s": 0.0,
                     }
+                    log.info("   SKIPPED — domain in skip list")
                 else:
                     r = dual_check(url, drv_chrome, drv_firefox,
                                    self.cf_signs, self.bad_titles, self.use_ff)
@@ -927,6 +951,9 @@ class AuditWorker(QThread):
                         "time_s": round(time.time() - t0, 2),
                         **r,
                     }
+                    log.info("   STATUS: %s | METHOD: %s | NOTES: %s",
+                             res["status"], res.get("method", ""), res.get("notes", ""))
+                log.info("")  # blank line between entries
                 self.result_ready.emit(res)
 
             self.status_msg.emit(
@@ -944,7 +971,7 @@ class AuditWorker(QThread):
 
 class MainWindow(QMainWindow):
 
-    TABLE_COLS = ["URL", "Status", "Title", "Notes", "Method", "Verified", "Time (s)"]
+    TABLE_COLS = ["#", "URL", "Status", "Title", "Method", "Verified", "Time (s)"]
 
     def __init__(self):
         super().__init__()
@@ -1204,18 +1231,15 @@ class MainWindow(QMainWindow):
         self.table.setShowGrid(True)
 
         hh = self.table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
-        hh.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
-        hh.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
-        hh.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(1, 90)
-        self.table.setColumnWidth(2, 220)
-        self.table.setColumnWidth(3, 280)
-        self.table.setColumnWidth(4, 150)
-        self.table.setColumnWidth(5, 140)
+        hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        hh.setStretchLastSection(False)
+        # Col 0=#, 1=URL, 2=Status, 3=Title, 4=Method, 5=Verified, 6=Time(s)
+        self.table.setColumnWidth(0, 45)
+        self.table.setColumnWidth(1, 360)
+        self.table.setColumnWidth(2, 90)
+        self.table.setColumnWidth(3, 260)
+        self.table.setColumnWidth(4, 140)
+        self.table.setColumnWidth(5, 160)
         self.table.setColumnWidth(6, 80)
 
         self.table.cellDoubleClicked.connect(self._on_cell_double_click)
@@ -1526,8 +1550,17 @@ class MainWindow(QMainWindow):
 
     def _add_table_row(self, res: dict):
         t = T()
-        row = self.table.rowCount()
-        self.table.insertRow(row)
+        # Insert at top so newest result appears first (descending order)
+        self.table.insertRow(0)
+
+        # Update existing # indices (shift all down by 1)
+        for r in range(1, self.table.rowCount()):
+            idx_item = self.table.item(r, 0)
+            if idx_item:
+                try:
+                    idx_item.setText(str(int(idx_item.text()) + 1))
+                except ValueError:
+                    pass
 
         status  = res.get("status", "")
         skipped = res.get("skipped", False)
@@ -1542,11 +1575,13 @@ class MainWindow(QMainWindow):
             bg = QColor(t["row_inactive"])
             sc = QColor(t["danger"])
 
+        # Cols: 0=#, 1=URL, 2=Status, 3=Title, 4=Method, 5=Verified, 6=Time(s)
+        seq_num = len(self.results_dict)
         values = [
+            str(seq_num),
             res.get("url", ""),
             status,
             res.get("title", ""),
-            res.get("notes", ""),
             res.get("method", ""),
             res.get("verified", ""),
             str(res.get("time_s", "")),
@@ -1555,20 +1590,23 @@ class MainWindow(QMainWindow):
         for col, val in enumerate(values):
             item = QTableWidgetItem(str(val))
             item.setBackground(bg)
-            if col == 1:
+            if col == 2:  # Status
                 item.setForeground(sc)
                 f = QFont()
                 f.setWeight(QFont.Weight.Bold)
                 item.setFont(f)
-            if col == 0:
+            elif col == 1:  # URL
                 item.setToolTip(f"Double-click to open in browser:  {val}")
                 item.setForeground(QColor(t["accent"]))
-            self.table.setItem(row, col, item)
+            elif col == 0:  # #
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                item.setForeground(QColor(t["text_secondary"]))
+            self.table.setItem(0, col, item)
 
     def _recolor_table(self):
         t = T()
         for row in range(self.table.rowCount()):
-            si = self.table.item(row, 1)
+            si = self.table.item(row, 2)  # Status is col 2
             if not si:
                 continue
             status = si.text()
@@ -1582,10 +1620,12 @@ class MainWindow(QMainWindow):
                 item = self.table.item(row, col)
                 if item:
                     item.setBackground(bg)
-                    if col == 1:
+                    if col == 2:  # Status
                         item.setForeground(sc)
-                    if col == 0:
+                    elif col == 1:  # URL
                         item.setForeground(QColor(t["accent"]))
+                    elif col == 0:  # #
+                        item.setForeground(QColor(t["text_secondary"]))
 
     def _update_metrics(self):
         results  = list(self.results_dict.values())
@@ -1600,7 +1640,7 @@ class MainWindow(QMainWindow):
         self.m_skipped.set_value(str(skipped))
 
     def _on_cell_double_click(self, row: int, col: int):
-        url_item = self.table.item(row, 0)
+        url_item = self.table.item(row, 1)  # URL is col 1
         if url_item:
             raw = url_item.text().strip()
             if raw:

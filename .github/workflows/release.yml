@@ -108,6 +108,19 @@ jobs:
           echo "ZIP_PATH=dist\$zipName" >> $env:GITHUB_ENV
           echo "ZIP_NAME=$zipName"      >> $env:GITHUB_ENV
 
+      - name: Delete existing release if present
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $existing = gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release delete $tag --yes --cleanup-tag
+            echo "Deleted existing release for $tag"
+          } else {
+            echo "No existing release for $tag"
+          }
+
       - name: Create Release and upload ZIP
         uses: softprops/action-gh-release@v2
         with:
@@ -115,7 +128,7 @@ jobs:
           tag_name: ${{ github.ref_name }}
           draft: false
           prerelease: false
-          generate_release_notes: true
+          generate_release_notes: false
           files: ${{ env.ZIP_PATH }}
           body: |
             ## URL Auditor Pro ${{ github.ref_name }}
@@ -127,8 +140,15 @@ jobs:
             | File | Description |
             |------|-------------|
             | `URL Auditor Pro.exe` | Main application |
-            | `chromedriver.exe` | Matched to the Chrome version on the build runner |
-            | `geckodriver.exe` | Latest GeckoDriver for Firefox (optional) |
+            | `chromedriver.exe` | Auto-matched to the Chrome version on the build runner |
+            | `geckodriver.exe` | Latest GeckoDriver for Firefox dual-browser verify (optional) |
+
+            ### Changelog ${{ github.ref_name }}
+            - **UI:** Added `#` index column, newest result shown at top (descending)
+            - **UI:** Removed Notes column from table; all columns are now drag-resizable
+            - **Logging:** New timestamped log file per run (`url_auditor_YYYY-MM-DD_HH-MM-SS.log`)
+            - **Dual-browser:** Firefox fallback only triggers when Chrome reports Inactive (not on driver errors)
+            - **Dual-browser:** Both-browser results now show combined Chrome + Firefox notes
 
             > **If ChromeDriver version mismatch on your machine:**
             > Download the chromedriver matching **your** Chrome version from
