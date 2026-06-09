@@ -36,17 +36,79 @@ jobs:
             --icon=logo.ico `
             --name="URL Auditor Pro" `
             --add-data "logo.ico;." `
+            --collect-all selenium `
+            --collect-all urllib3 `
+            --hidden-import=selenium.webdriver.chrome.webdriver `
+            --hidden-import=selenium.webdriver.firefox.webdriver `
+            --hidden-import=selenium.webdriver.chrome.service `
+            --hidden-import=selenium.webdriver.firefox.service `
+            --hidden-import=selenium.webdriver.common.service `
+            --hidden-import=selenium.webdriver.remote.webdriver `
+            --hidden-import=webdriver_manager.chrome `
+            --hidden-import=webdriver_manager.firefox `
             url_auditor.py
 
-      - name: Rename artifact
+      - name: Get installed Chrome version
+        id: chrome_version
+        run: |
+          $version = (Get-Item "C:\Program Files\Google\Chrome\Application\chrome.exe").VersionInfo.FileVersion
+          $major = $version.Split(".")[0]
+          echo "CHROME_MAJOR=$major" >> $env:GITHUB_ENV
+          echo "Chrome version: $version (major: $major)"
+
+      - name: Download matching ChromeDriver
+        run: |
+          $major = "${{ env.CHROME_MAJOR }}"
+          # Get the matching chromedriver version from Chrome for Testing API
+          $apiUrl = "https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json"
+          $data = Invoke-RestMethod -Uri $apiUrl
+          # Find latest version matching the major
+          $match = $data.versions | Where-Object { $_.version.StartsWith("$major.") } | Select-Object -Last 1
+          if (-not $match) {
+            Write-Error "No chromedriver found for Chrome major version $major"
+            exit 1
+          }
+          $download = $match.downloads.chromedriver | Where-Object { $_.platform -eq "win64" }
+          $url = $download.url
+          echo "Downloading chromedriver $($match.version) from $url"
+          Invoke-WebRequest -Uri $url -OutFile "chromedriver_win64.zip"
+          Expand-Archive -Path "chromedriver_win64.zip" -DestinationPath "chromedriver_extracted" -Force
+          $exe = Get-ChildItem -Path "chromedriver_extracted" -Recurse -Filter "chromedriver.exe" | Select-Object -First 1
+          Copy-Item $exe.FullName -Destination "dist\chromedriver.exe"
+          echo "ChromeDriver $($match.version) ready"
+
+      - name: Download latest GeckoDriver
+        run: |
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/mozilla/geckodriver/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -like "*win64.zip" } | Select-Object -First 1
+          if (-not $asset) {
+            Write-Warning "GeckoDriver win64 asset not found, skipping"
+          } else {
+            echo "Downloading geckodriver $($release.tag_name): $($asset.browser_download_url)"
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "geckodriver.zip"
+            Expand-Archive -Path "geckodriver.zip" -DestinationPath "geckodriver_extracted" -Force
+            Copy-Item "geckodriver_extracted\geckodriver.exe" -Destination "dist\geckodriver.exe"
+            echo "GeckoDriver $($release.tag_name) ready"
+          }
+
+      - name: Package release ZIP
         run: |
           $tag = "${{ github.ref_name }}"
-          $src = "dist\URL Auditor Pro.exe"
-          $dst = "dist\URL-Auditor-Pro-$tag-windows.exe"
-          Rename-Item -Path $src -NewName (Split-Path $dst -Leaf)
-          echo "EXE_PATH=$dst" >> $env:GITHUB_ENV
+          $zipName = "URL-Auditor-Pro-$tag-windows.zip"
+          $staging = "release_staging"
+          New-Item -ItemType Directory -Path $staging | Out-Null
 
-      - name: Create Release and upload EXE
+          Copy-Item "dist\URL Auditor Pro.exe" "$staging\URL Auditor Pro.exe"
+          Copy-Item "dist\chromedriver.exe"    "$staging\chromedriver.exe"
+          if (Test-Path "dist\geckodriver.exe") {
+            Copy-Item "dist\geckodriver.exe"   "$staging\geckodriver.exe"
+          }
+
+          Compress-Archive -Path "$staging\*" -DestinationPath "dist\$zipName" -Force
+          echo "ZIP_PATH=dist\$zipName" >> $env:GITHUB_ENV
+          echo "ZIP_NAME=$zipName"      >> $env:GITHUB_ENV
+
+      - name: Create Release and upload ZIP
         uses: softprops/action-gh-release@v2
         with:
           name: "URL Auditor Pro ${{ github.ref_name }}"
@@ -54,18 +116,24 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
-          files: ${{ env.EXE_PATH }}
+          files: ${{ env.ZIP_PATH }}
           body: |
             ## URL Auditor Pro ${{ github.ref_name }}
 
             ### Download
-            Download **`URL-Auditor-Pro-${{ github.ref_name }}-windows.exe`** below.
+            Download **`${{ env.ZIP_NAME }}`** below — extract the folder and run `URL Auditor Pro.exe`.
 
-            > **Note:** Place `chromedriver.exe` (and optionally `geckodriver.exe`) in the same folder as the `.exe` before running.
-            > Download ChromeDriver from https://chromedriver.chromium.org/downloads — match your installed Chrome version.
+            ### What's included in the ZIP
+            | File | Description |
+            |------|-------------|
+            | `URL Auditor Pro.exe` | Main application |
+            | `chromedriver.exe` | Matched to the Chrome version on the build runner |
+            | `geckodriver.exe` | Latest GeckoDriver for Firefox (optional) |
 
-            ### What's included
-            - Single-file Windows executable (no Python install needed)
-            - All dependencies bundled
+            > **If ChromeDriver version mismatch on your machine:**
+            > Download the chromedriver matching **your** Chrome version from
+            > https://googlechromelabs.github.io/chrome-for-testing/
+            > and replace `chromedriver.exe` in the folder.
+            > Check your Chrome version at `chrome://version`
 
             See [README](https://github.com/sudhirjangra/url-auditor-pro#readme) for full usage instructions.

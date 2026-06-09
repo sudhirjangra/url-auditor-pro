@@ -873,14 +873,15 @@ class AuditWorker(QThread):
         if not drv_chrome:
             msg = (
                 "Chrome WebDriver failed to start.\n\n"
-                "URL Auditor Pro tried three strategies in order:\n"
-                "  1. Local chromedriver.exe next to this app\n"
-                "  2. Selenium Manager (auto-match)\n"
-                "  3. webdriver-manager (auto-download)\n\n"
-                "All three failed. Check url_auditor_errors.log for details.\n\n"
-                "Quick fix: download chromedriver matching your Chrome version from\n"
-                "https://chromedriver.chromium.org/downloads\n"
-                "and place it next to this app."
+                "Most likely cause: chromedriver.exe version does not match\n"
+                "your installed Chrome version.\n\n"
+                "Fix:\n"
+                "  1. Check your Chrome version at chrome://version\n"
+                "  2. Download the matching chromedriver from:\n"
+                "     https://googlechromelabs.github.io/chrome-for-testing/\n"
+                "  3. Replace chromedriver.exe in the same folder as this app.\n\n"
+                "Details saved to: url_auditor_errors.log\n"
+                "(in the same folder as this app)"
             )
             log.error("Chrome WebDriver could not start — all strategies exhausted")
             self.error.emit(msg)
