@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.spec
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# PyInstaller output
+*.exe
+*.app
+dist/
+build/
+
+# WebDrivers (user must supply their own)
+chromedriver.exe
+chromedriver
+geckodriver.exe
+geckodriver
+
+# Config (user-generated at runtime)
+url_auditor_config.xml
+
+# Reports
+url_audit_report_*.xlsx
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
