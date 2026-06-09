@@ -113,13 +113,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ github.ref_name }}"
-          $existing = gh release view $tag 2>$null
+          gh release view $tag 2>$null
           if ($LASTEXITCODE -eq 0) {
             gh release delete $tag --yes --cleanup-tag
             echo "Deleted existing release for $tag"
           } else {
             echo "No existing release for $tag"
           }
+          exit 0
 
       - name: Create Release and upload ZIP
         uses: softprops/action-gh-release@v2
