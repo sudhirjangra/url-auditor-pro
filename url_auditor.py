@@ -651,6 +651,28 @@ def setup_firefox(headless: bool = True):
         return None
 
 
+# Browser-generated error page markers (never real content)
+_BROWSER_ERROR_URLS = (
+    "about:neterror", "chrome-error://", "data:text/html",
+)
+_BROWSER_ERROR_TITLES = (
+    "problem loading page", "server not found", "unable to connect",
+    "connection timed out", "address not found", "network error",
+    "page not available", "err_", "site can't be reached",
+)
+
+
+def _is_browser_error_page(current_url: str, title: str) -> bool:
+    """Return True if the browser landed on its own built-in error page."""
+    cu = (current_url or "").lower()
+    tl = (title or "").lower()
+    if any(cu.startswith(p) for p in _BROWSER_ERROR_URLS):
+        return True
+    if any(p in tl for p in _BROWSER_ERROR_TITLES):
+        return True
+    return False
+
+
 def selenium_check(url: str, driver, cf_signs: list, bad_titles: list) -> tuple[str, str, str]:
     if driver is None:
         return "Error", "", "Driver not initialized"
@@ -685,17 +707,23 @@ def selenium_check(url: str, driver, cf_signs: list, bad_titles: list) -> tuple[
 
     time.sleep(2)
     try:
-        title       = driver.title.strip() if driver.title else ""
-        page_source = driver.page_source.lower() if driver.page_source else ""
+        title        = driver.title.strip() if driver.title else ""
+        page_source  = driver.page_source.lower() if driver.page_source else ""
+        current_url  = driver.current_url or ""
     except Exception:
-        pass
+        current_url = ""
+
+    # Browser built-in error page (Firefox "Problem loading page", Chrome "ERR_*")
+    # These are never user content — always a connection failure
+    if _is_browser_error_page(current_url, title):
+        return "Inactive", title, "Browser error page (connection/DNS failure)"
 
     dns_errors = ["err_connection", "dns_probe", "this site can't be reached",
                   "server not found", "took too long to respond"]
     if any(e in page_source for e in dns_errors):
         return "Inactive", title, "DNS / Connection Error"
 
-    # Check HTTP error codes in title first (e.g. "403 Forbidden", "500 Internal Server Error")
+    # HTTP error codes in title (e.g. "403 Forbidden", "500 Internal Server Error")
     http_bad, http_reason = is_http_error_title(title)
     if http_bad:
         return "Inactive", title, http_reason
@@ -705,6 +733,29 @@ def selenium_check(url: str, driver, cf_signs: list, bad_titles: list) -> tuple[
         return "Inactive", title, f"Bad Title: '{matched}'"
 
     if not title:
+        # JS-heavy pages may still be rendering — wait once more then recheck
+        time.sleep(3)
+        try:
+            title       = driver.title.strip() if driver.title else ""
+            page_source = driver.page_source.lower() if driver.page_source else ""
+            current_url = driver.current_url or ""
+        except Exception:
+            pass
+
+        if _is_browser_error_page(current_url, title):
+            return "Inactive", title, "Browser error page (connection/DNS failure)"
+
+        if title:
+            # Got a title after extra wait — re-run bad-title checks
+            http_bad, http_reason = is_http_error_title(title)
+            if http_bad:
+                return "Inactive", title, http_reason
+            bad, matched = is_bad_title(title, bad_titles)
+            if bad:
+                return "Inactive", title, f"Bad Title: '{matched}'"
+            elapsed = time.time() - start
+            return "Active", title, f"OK — Delayed ({round(elapsed, 1)}s)"
+
         try:
             body = driver.find_element("tag name", "body").text.strip()
             if len(body) < 30:
