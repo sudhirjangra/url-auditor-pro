@@ -1,4 +1,4 @@
-name: Build User EXE
+name: Build and Release
 
 on:
   push:
@@ -150,3 +150,100 @@ jobs:
             > Check your Chrome version at `chrome://version`
 
             See [README](https://github.com/${{ github.repository }}#readme) for full usage instructions.
+
+  build-auto:
+    name: Build Windows Headless EXE
+    runs-on: windows-latest
+    needs: build-windows
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pillow
+
+      - name: Generate icon
+        run: python generate_icon.py
+
+      - name: Build headless EXE with PyInstaller
+        run: |
+          pyinstaller `
+            --onefile `
+            --console `
+            --icon=logo.ico `
+            --name="URL Auditor Auto" `
+            --add-data "logo.ico;." `
+            --collect-all selenium `
+            --collect-all urllib3 `
+            --hidden-import=selenium.webdriver.chrome.webdriver `
+            --hidden-import=selenium.webdriver.firefox.webdriver `
+            --hidden-import=selenium.webdriver.chrome.service `
+            --hidden-import=selenium.webdriver.firefox.service `
+            --hidden-import=selenium.webdriver.common.service `
+            --hidden-import=selenium.webdriver.remote.webdriver `
+            --hidden-import=webdriver_manager.chrome `
+            --hidden-import=webdriver_manager.firefox `
+            url_auditor_headless.py
+
+      - name: Get installed Chrome version
+        run: |
+          $version = (Get-Item "C:\Program Files\Google\Chrome\Application\chrome.exe").VersionInfo.FileVersion
+          $major = $version.Split(".")[0]
+          echo "CHROME_MAJOR=$major" >> $env:GITHUB_ENV
+
+      - name: Download matching ChromeDriver
+        run: |
+          $major = "${{ env.CHROME_MAJOR }}"
+          $apiUrl = "https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json"
+          $data = Invoke-RestMethod -Uri $apiUrl
+          $match = $data.versions | Where-Object { $_.version.StartsWith("$major.") } | Select-Object -Last 1
+          if (-not $match) {
+            Write-Error "No chromedriver found for Chrome major version $major"
+            exit 1
+          }
+          $download = $match.downloads.chromedriver | Where-Object { $_.platform -eq "win64" }
+          Invoke-WebRequest -Uri $download.url -OutFile "chromedriver_win64.zip"
+          Expand-Archive -Path "chromedriver_win64.zip" -DestinationPath "chromedriver_extracted" -Force
+          $exe = Get-ChildItem -Path "chromedriver_extracted" -Recurse -Filter "chromedriver.exe" | Select-Object -First 1
+          Copy-Item $exe.FullName -Destination "dist\chromedriver.exe"
+
+      - name: Download latest GeckoDriver
+        run: |
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/mozilla/geckodriver/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -like "*win64.zip" } | Select-Object -First 1
+          if ($asset) {
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "geckodriver.zip"
+            Expand-Archive -Path "geckodriver.zip" -DestinationPath "geckodriver_extracted" -Force
+            Copy-Item "geckodriver_extracted\geckodriver.exe" -Destination "dist\geckodriver.exe"
+          }
+
+      - name: Package auto ZIP
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $zipName = "URL-Auditor-Auto-$tag-windows.zip"
+          $staging = "auto_staging"
+          New-Item -ItemType Directory -Path $staging | Out-Null
+
+          Copy-Item "dist\URL Auditor Auto.exe" "$staging\URL Auditor Auto.exe"
+          Copy-Item "dist\chromedriver.exe"     "$staging\chromedriver.exe"
+          if (Test-Path "dist\geckodriver.exe") {
+            Copy-Item "dist\geckodriver.exe"    "$staging\geckodriver.exe"
+          }
+
+          Compress-Archive -Path "$staging\*" -DestinationPath "dist\$zipName" -Force
+          echo "AUTO_ZIP_PATH=dist\$zipName" >> $env:GITHUB_ENV
+
+      - name: Upload auto ZIP to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: ${{ env.AUTO_ZIP_PATH }}
