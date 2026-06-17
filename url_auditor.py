@@ -49,7 +49,7 @@ def _get_icon_path() -> str:
     return p if os.path.exists(p) else ""
 
 
-def _app_icon() -> QIcon:
+def _app_icon():
     path = _get_icon_path()
     return QIcon(path) if path else QIcon()
 
