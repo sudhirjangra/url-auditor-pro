@@ -27,9 +27,31 @@ from selenium.common.exceptions import WebDriverException, TimeoutException
 
 # ── Logging setup ──────────────────────────────────────────────────────────────
 
-def _get_log_base() -> str:
+def _get_base_dir() -> str:
+    """Directory that contains the frozen EXE or the running script."""
     return (os.path.dirname(sys.executable)
-            if getattr(sys, "frozen", False) else os.getcwd())
+            if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__)))
+
+
+def _get_log_base() -> str:
+    return _get_base_dir()
+
+
+def _get_icon_path() -> str:
+    """Locate logo.ico: check PyInstaller _MEIPASS bundle first, then base dir."""
+    if getattr(sys, "frozen", False):
+        mei = getattr(sys, "_MEIPASS", None)
+        if mei:
+            p = os.path.join(mei, "logo.ico")
+            if os.path.exists(p):
+                return p
+    p = os.path.join(_get_base_dir(), "logo.ico")
+    return p if os.path.exists(p) else ""
+
+
+def _app_icon() -> QIcon:
+    path = _get_icon_path()
+    return QIcon(path) if path else QIcon()
 
 
 def _init_logger() -> logging.Logger:
@@ -64,7 +86,8 @@ from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, QSize, QTimer, QUrl, QMimeData
 )
 from PyQt6.QtGui import (
-    QFont, QColor, QDesktopServices, QAction, QDragEnterEvent, QDropEvent
+    QFont, QColor, QDesktopServices, QAction, QDragEnterEvent, QDropEvent,
+    QIcon, QPixmap
 )
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -473,45 +496,58 @@ def build_stylesheet(theme: dict) -> str:
 # ── Config helpers ─────────────────────────────────────────────────────────────
 
 def get_config_path() -> str:
-    base = (os.path.dirname(sys.executable)
-            if getattr(sys, "frozen", False) else os.getcwd())
-    return os.path.join(base, CONFIG_FILENAME)
+    return os.path.join(_get_base_dir(), CONFIG_FILENAME)
 
 
-def load_config() -> tuple[list, list, list]:
+def load_config() -> tuple[list, list, list, str, str]:
+    """Returns (skip_domains, bad_titles, cf_signs, url_column, status_column)."""
     path = get_config_path()
     if not os.path.exists(path):
-        save_config(_DEFAULT_SKIP_DOMAINS, _DEFAULT_BAD_TITLES, _DEFAULT_CF_SIGNS)
-        return list(_DEFAULT_SKIP_DOMAINS), list(_DEFAULT_BAD_TITLES), list(_DEFAULT_CF_SIGNS)
+        save_config(_DEFAULT_SKIP_DOMAINS, _DEFAULT_BAD_TITLES, _DEFAULT_CF_SIGNS, "", "")
+        return (list(_DEFAULT_SKIP_DOMAINS), list(_DEFAULT_BAD_TITLES),
+                list(_DEFAULT_CF_SIGNS), "", "")
     try:
         root = ET.parse(path).getroot()
 
-        def read(tag, child):
+        def read_list(tag, child):
             node = root.find(tag)
             if node is None:
                 return []
             return [c.text.strip() for c in node.findall(child) if c.text and c.text.strip()]
 
-        skip = read("skip_domains", "domain") or list(_DEFAULT_SKIP_DOMAINS)
-        bad  = read("bad_titles",   "title")  or list(_DEFAULT_BAD_TITLES)
-        cf   = read("cf_signs",     "sign")   or list(_DEFAULT_CF_SIGNS)
-        return skip, bad, cf
+        def read_text(tag) -> str:
+            node = root.find(tag)
+            return (node.text or "").strip() if node is not None else ""
+
+        skip = read_list("skip_domains", "domain") or list(_DEFAULT_SKIP_DOMAINS)
+        bad  = read_list("bad_titles",   "title")  or list(_DEFAULT_BAD_TITLES)
+        cf   = read_list("cf_signs",     "sign")   or list(_DEFAULT_CF_SIGNS)
+        url_col    = read_text("url_column")
+        status_col = read_text("status_column")
+        return skip, bad, cf, url_col, status_col
     except Exception as e:
         print(f"Config load error: {e}")
-        return list(_DEFAULT_SKIP_DOMAINS), list(_DEFAULT_BAD_TITLES), list(_DEFAULT_CF_SIGNS)
+        return (list(_DEFAULT_SKIP_DOMAINS), list(_DEFAULT_BAD_TITLES),
+                list(_DEFAULT_CF_SIGNS), "", "")
 
 
-def save_config(skip_domains: list, bad_titles: list, cf_signs: list):
+def save_config(skip_domains: list, bad_titles: list, cf_signs: list,
+                url_col: str = "", status_col: str = ""):
     root = ET.Element("url_auditor_config")
 
-    def write(parent_tag, child_tag, items):
+    def write_list(parent_tag, child_tag, items):
         parent = ET.SubElement(root, parent_tag)
         for item in items:
             ET.SubElement(parent, child_tag).text = item
 
-    write("skip_domains", "domain", skip_domains)
-    write("bad_titles",   "title",  bad_titles)
-    write("cf_signs",     "sign",   cf_signs)
+    write_list("skip_domains", "domain", skip_domains)
+    write_list("bad_titles",   "title",  bad_titles)
+    write_list("cf_signs",     "sign",   cf_signs)
+
+    if url_col:
+        ET.SubElement(root, "url_column").text = url_col
+    if status_col:
+        ET.SubElement(root, "status_column").text = status_col
 
     ET.indent(root, space="    ")
     try:
@@ -1029,13 +1065,17 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APP_NAME}  v{APP_VERSION}  —  by {DEVELOPER}")
         self.resize(1400, 860)
         self.setMinimumSize(900, 600)
+        icon = _app_icon()
+        if not icon.isNull():
+            self.setWindowIcon(icon)
 
         self.df           = None
         self.unique_urls  = []
         self.results_dict = {}
         self.worker: AuditWorker | None = None
 
-        self.skip_domains, self.bad_titles, self.cf_signs = load_config()
+        self.skip_domains, self.bad_titles, self.cf_signs, \
+            self._saved_url_col, self._saved_status_col = load_config()
 
         # Debounce timer for auto-saving rules (fires 1.5s after last keystroke)
         self._autosave_timer = QTimer(self)
@@ -1046,6 +1086,7 @@ class MainWindow(QMainWindow):
         self._setup_menu()
         self._build_ui()
         self._apply_theme()
+        self._auto_load_input()
 
     # ── Menu ──────────────────────────────────────────────────────────────────
 
@@ -1155,6 +1196,7 @@ class MainWindow(QMainWindow):
         self.combo_url = QComboBox()
         self.combo_url.addItem("(None)")
         self.combo_url.currentTextChanged.connect(self._on_url_col_change)
+        self.combo_url.currentTextChanged.connect(self._schedule_autosave)
         grp_file_layout.addWidget(self.combo_url)
 
         lbl_status = QLabel("Previous Status Column  (optional)")
@@ -1162,6 +1204,7 @@ class MainWindow(QMainWindow):
         grp_file_layout.addWidget(lbl_status)
         self.combo_status = QComboBox()
         self.combo_status.addItem("(None)")
+        self.combo_status.currentTextChanged.connect(self._schedule_autosave)
         grp_file_layout.addWidget(self.combo_status)
 
         layout.addWidget(grp_file)
@@ -1407,6 +1450,16 @@ class MainWindow(QMainWindow):
         s.setFrameShape(QFrame.Shape.HLine)
         return s
 
+    # ── Auto-load ─────────────────────────────────────────────────────────────
+
+    def _auto_load_input(self):
+        """If input.xlsx exists next to the EXE/script, load it silently."""
+        candidate = os.path.join(_get_base_dir(), "input.xlsx")
+        if os.path.exists(candidate):
+            self._load_file(candidate)
+            self.status_bar.showMessage(
+                f"Auto-loaded: input.xlsx  ({len(self.df):,} rows)")
+
     # ── Theme ─────────────────────────────────────────────────────────────────
 
     def _apply_theme(self):
@@ -1453,6 +1506,13 @@ class MainWindow(QMainWindow):
             self.combo_status.clear()
             self.combo_status.addItem("(None)")
             self.combo_status.addItems(cols)
+
+            # restore previously saved column selections
+            if self._saved_url_col and self._saved_url_col in cols:
+                self.combo_url.setCurrentText(self._saved_url_col)
+            if self._saved_status_col and self._saved_status_col in cols:
+                self.combo_status.setCurrentText(self._saved_status_col)
+
             self._prepare_urls()
             self.status_bar.showMessage(f"Loaded: {fname}  ({len(self.df):,} rows)")
         except Exception as e:
@@ -1493,7 +1553,11 @@ class MainWindow(QMainWindow):
         self.skip_domains = [x.strip() for x in self.txt_skip.toPlainText().split(",") if x.strip()]
         self.bad_titles   = [x.strip() for x in self.txt_bad_titles.toPlainText().split(",") if x.strip()]
         self.cf_signs     = [x.strip() for x in self.txt_cf.toPlainText().split(",") if x.strip()]
-        save_config(self.skip_domains, self.bad_titles, self.cf_signs)
+        url_col    = self.combo_url.currentText()
+        status_col = self.combo_status.currentText()
+        save_config(self.skip_domains, self.bad_titles, self.cf_signs,
+                    url_col if url_col != "(None)" else "",
+                    status_col if status_col != "(None)" else "")
         self.lbl_autosave.setText(
             f"Auto-saved  {datetime.now().strftime('%H:%M:%S')}")
         self.status_bar.showMessage(
@@ -1703,13 +1767,13 @@ class MainWindow(QMainWindow):
         if not self.results_dict:
             QMessageBox.warning(self, "No Results", "Run an audit first.")
             return
-        folder = QFileDialog.getExistingDirectory(self, "Select Save Folder")
-        if not folder:
-            return
 
-        now      = datetime.now()
-        filename = now.strftime("url_audit_report_%d-%m-%Y_%H-%M.xlsx")
-        path     = os.path.join(folder, filename)
+        now       = datetime.now()
+        ts_folder = now.strftime("output_%Y-%m-%d_%H-%M-%S")
+        out_dir   = os.path.join(_get_base_dir(), ts_folder)
+        os.makedirs(out_dir, exist_ok=True)
+        filename  = now.strftime("url_audit_report_%d-%m-%Y_%H-%M.xlsx")
+        path      = os.path.join(out_dir, filename)
 
         try:
             out = self.df.copy()
@@ -1758,6 +1822,9 @@ def main():
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
     app.setFont(QFont("Segoe UI", 10))
+    icon = _app_icon()
+    if not icon.isNull():
+        app.setWindowIcon(icon)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

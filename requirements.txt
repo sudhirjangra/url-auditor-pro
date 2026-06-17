@@ -4,3 +4,4 @@ openpyxl>=3.0.10
 selenium>=4.8.0
 urllib3>=1.26.0
 webdriver-manager>=4.0.0
+pillow>=10.0.0
