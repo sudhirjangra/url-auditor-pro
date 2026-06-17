@@ -139,11 +139,14 @@ def run(input_path: str, url_col: str, status_col: str,
 
     # ── audit loop ────────────────────────────────────────────────────────────
     results: dict = {}
+    _SEP = "-" * 72
     try:
         for i, (norm_key, raw_url) in enumerate(unique_urls):
             url = full_url(raw_url)
-            log.info("[%d/%d] %s", i + 1, total, url)
-            t0 = time.time()
+            t0  = time.time()
+
+            log.info(_SEP)
+            log.info("URL %d/%d : %s", i + 1, total, url)
 
             if check_skip_domain(url, skip_domains):
                 res = {
@@ -152,18 +155,27 @@ def run(input_path: str, url_col: str, status_col: str,
                     "method": "Skip Rule", "verified": "N/A",
                     "skipped": True, "time_s": 0.0,
                 }
-                log.info("  → SKIPPED")
+                log.info("  Status  : SKIPPED")
+                log.info("  Reason  : Domain in skip list")
             else:
                 r   = dual_check(url, drv_chrome, drv_firefox,
                                  cf_signs, bad_titles, use_firefox)
-                res = {
-                    "skipped": False,
-                    "time_s": round(time.time() - t0, 2),
-                    **r,
-                }
-                log.info("  -> %s  [%s]  %.1fs",
-                         res["status"], res.get("method", ""), res["time_s"])
+                elapsed = round(time.time() - t0, 2)
+                res = {"skipped": False, "time_s": elapsed, **r}
+
+                status = res["status"]
+                log.info("  Status  : %s", status)
+                log.info("  Method  : %s", res.get("method", ""))
+                log.info("  Verified: %s", res.get("verified", ""))
+                log.info("  Title   : %s", res.get("title", "") or "(empty)")
+                log.info("  Notes   : %s", res.get("notes", ""))
+                log.info("  Time    : %.2f s", elapsed)
+                if status == "Inactive":
+                    log.warning("  *** INACTIVE — %s", res.get("notes", "no reason"))
+
             results[norm_key] = res
+
+        log.info(_SEP)
     finally:
         try:
             if drv_chrome:  drv_chrome.quit()

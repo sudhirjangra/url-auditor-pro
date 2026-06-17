@@ -630,6 +630,15 @@ def _chrome_opts(headless: bool) -> ChromeOptions:
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
     opts.add_argument("--log-level=3")
+    # Suppress bot-detection signals: removes HeadlessChrome from UA and
+    # clears navigator.webdriver / automation flags that trigger 403s.
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+    )
+    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_experimental_option("useAutomationExtension", False)
     return opts
 
 
@@ -673,6 +682,8 @@ def setup_firefox(headless: bool = True):
     opts.page_load_strategy = "eager"
     if headless:
         opts.add_argument("--headless")
+    # Accept self-signed / expired certs — prevents nssFailure2 on GitHub Actions
+    opts.accept_insecure_certs = True
     local = "geckodriver.exe" if os.name == "nt" else "geckodriver"
     dp = os.path.join(get_driver_base(), local)
     if not os.path.exists(dp):
@@ -718,9 +729,18 @@ def selenium_check(url: str, driver, cf_signs: list, bad_titles: list) -> tuple[
         driver.get(url)
     except TimeoutException:
         pass
+    except WebDriverException as e:
+        msg = str(e)
+        # "cannot determine loading status" fires mid-navigation when the page
+        # redirects quickly; the page is still loading — do not fail here.
+        if "cannot determine loading status" in msg.lower():
+            log.debug("selenium_check: transient loading status error for %s — continuing", url)
+        else:
+            log.warning("selenium_check connection failed for %s: %s", url, e)
+            return "Inactive", "", f"Connection failed: {msg[:80]}"
     except Exception as e:
-        log.warning("selenium_check connection failed for %s: %s", url, e)
-        return "Inactive", "", f"Connection failed: {str(e)[:60]}"
+        log.warning("selenium_check unexpected error for %s: %s", url, e)
+        return "Inactive", "", f"Connection failed: {str(e)[:80]}"
 
     start = time.time()
     title = page_source = ""
