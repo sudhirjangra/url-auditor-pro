@@ -115,8 +115,9 @@ _DEFAULT_BAD_TITLES = [
 
 _DEFAULT_CF_SIGNS = [
     "checking your browser", "please stand by", "verify you are human",
-    "security check", "attention required", "cf-browser-verification",
-    "cloudflare", "incapsula", "access denied", "Just a moment...",
+    "cf-browser-verification", "just a moment...",
+    "enable javascript and cookies to continue",
+    "incapsula incident id",
 ]
 
 _DEFAULT_SKIP_DOMAINS: list[str] = []
@@ -712,7 +713,7 @@ def _is_browser_error_page(current_url: str, title: str) -> bool:
 def selenium_check(url: str, driver, cf_signs: list, bad_titles: list) -> tuple[str, str, str]:
     if driver is None:
         return "Error", "", "Driver not initialized"
-    driver.set_page_load_timeout(10)
+    driver.set_page_load_timeout(30)
     try:
         driver.get(url)
     except TimeoutException:

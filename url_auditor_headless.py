@@ -70,6 +70,12 @@ def _init_logger() -> logging.Logger:
     ch = logging.StreamHandler(sys.stdout)
     ch.setLevel(logging.INFO)
     ch.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+    # GitHub Actions runner console is cp1252 on Windows — force UTF-8 to avoid UnicodeEncodeError
+    if hasattr(ch.stream, "reconfigure"):
+        try:
+            ch.stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     logger.addHandler(ch)
 
     return logger
@@ -155,7 +161,7 @@ def run(input_path: str, url_col: str, status_col: str,
                     "time_s": round(time.time() - t0, 2),
                     **r,
                 }
-                log.info("  → %s  [%s]  %.1fs",
+                log.info("  -> %s  [%s]  %.1fs",
                          res["status"], res.get("method", ""), res["time_s"])
             results[norm_key] = res
     finally:
