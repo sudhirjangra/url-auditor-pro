@@ -41,6 +41,7 @@ jobs:
             --add-data "logo.ico;." `
             --collect-all selenium `
             --collect-all urllib3 `
+            --collect-all requests `
             --hidden-import=selenium.webdriver.chrome.webdriver `
             --hidden-import=selenium.webdriver.firefox.webdriver `
             --hidden-import=selenium.webdriver.chrome.service `
@@ -49,6 +50,8 @@ jobs:
             --hidden-import=selenium.webdriver.remote.webdriver `
             --hidden-import=webdriver_manager.chrome `
             --hidden-import=webdriver_manager.firefox `
+            --hidden-import=requests `
+            --hidden-import=urllib3 `
             url_auditor.py
 
       - name: Get installed Chrome version
@@ -184,6 +187,7 @@ jobs:
             --add-data "logo.ico;." `
             --collect-all selenium `
             --collect-all urllib3 `
+            --collect-all requests `
             --hidden-import=selenium.webdriver.chrome.webdriver `
             --hidden-import=selenium.webdriver.firefox.webdriver `
             --hidden-import=selenium.webdriver.chrome.service `
@@ -192,6 +196,8 @@ jobs:
             --hidden-import=selenium.webdriver.remote.webdriver `
             --hidden-import=webdriver_manager.chrome `
             --hidden-import=webdriver_manager.firefox `
+            --hidden-import=requests `
+            --hidden-import=urllib3 `
             url_auditor_headless.py
 
       - name: Get installed Chrome version

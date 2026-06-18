@@ -16,6 +16,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from urllib.parse import urlparse
 
+import requests as _requests
 import pandas as pd
 import urllib3
 from selenium import webdriver
@@ -95,7 +96,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 APP_NAME    = "URL Auditor Pro"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.2.5"
 DEVELOPER   = "Sudhir Jangra"
 
 SOFT_TIMEOUT = 20
@@ -735,6 +736,11 @@ def selenium_check(url: str, driver, cf_signs: list, bad_titles: list) -> tuple[
         # redirects quickly; the page is still loading — do not fail here.
         if "cannot determine loading status" in msg.lower():
             log.debug("selenium_check: transient loading status error for %s — continuing", url)
+        # WebDriver internal socket timeout (HTTPConnectionPool/Read timed out) means
+        # the driver process itself timed out waiting for a response — not necessarily
+        # that the target site is down. Treat like TimeoutException and inspect page state.
+        elif "httpconnectionpool" in msg.lower() and "read timed out" in msg.lower():
+            log.debug("selenium_check: WebDriver socket timeout for %s — inspecting page state", url)
         else:
             log.warning("selenium_check connection failed for %s: %s", url, e)
             return "Inactive", "", f"Connection failed: {msg[:80]}"
@@ -826,6 +832,55 @@ def selenium_check(url: str, driver, cf_signs: list, bad_titles: list) -> tuple[
     return "Active", title, f"OK — Slow ({round(elapsed, 1)}s)"
 
 
+_NETWORK_FAIL_MARKERS = (
+    "err_connection_timed_out", "err_connection_reset", "err_connection_refused",
+    "err_name_not_resolved", "dns_probe", "nssFailure2", "netTimeout",
+    "connection/dns failure", "dns / connection error",
+    "connection failed",
+)
+
+
+def _is_network_level_failure(notes: str) -> bool:
+    nl = (notes or "").lower()
+    return any(m.lower() in nl for m in _NETWORK_FAIL_MARKERS)
+
+
+def _requests_fallback(url: str) -> tuple[str, str]:
+    """HTTP(S) GET fallback when both Selenium browsers report network errors.
+
+    Returns (status, reason) where status is 'Active' or 'Inactive'.
+    Uses a generous timeout and ignores TLS errors to handle sites that block
+    headless browser IPs but respond to plain HTTP requests.
+    """
+    _FALLBACK_TIMEOUT = 20
+    _FALLBACK_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+        )
+    }
+    try:
+        resp = _requests.get(
+            url,
+            timeout=_FALLBACK_TIMEOUT,
+            verify=False,
+            allow_redirects=True,
+            headers=_FALLBACK_HEADERS,
+        )
+        code = resp.status_code
+        if code < 400:
+            return "Active", f"HTTP {code} (requests fallback)"
+        return "Inactive", f"HTTP {code} (requests fallback)"
+    except _requests.exceptions.SSLError as e:
+        return "Active", f"SSL error but server reachable (requests fallback): {str(e)[:60]}"
+    except _requests.exceptions.ConnectionError:
+        return "Inactive", "requests fallback: connection error"
+    except _requests.exceptions.Timeout:
+        return "Inactive", "requests fallback: timed out"
+    except Exception as e:
+        return "Inactive", f"requests fallback error: {str(e)[:60]}"
+
+
 def dual_check(url: str, drv_chrome, drv_firefox, cf_signs: list,
                bad_titles: list, use_ff: bool) -> dict:
     sc, tc, mc = selenium_check(url, drv_chrome, cf_signs, bad_titles)
@@ -842,13 +897,37 @@ def dual_check(url: str, drv_chrome, drv_firefox, cf_signs: list,
             return {"status": "Active", "title": tf,
                     "notes": f"Chrome: {mc} | Firefox: Active",
                     "verified": "Firefox override", "method": "Firefox"}
-        # Both Inactive — trust the more descriptive reason
+        # Both Inactive — if both failed due to network-level errors (timeout/reset/DNS),
+        # use requests HTTP fallback before declaring the site inactive. This handles
+        # sites that block headless browser IPs on CI runners but respond to plain HTTP.
         combined_notes = f"Chrome: {mc} | Firefox: {mf}"
+        if _is_network_level_failure(mc) or _is_network_level_failure(mf):
+            log.info("   Both browsers: network failure — trying requests fallback: %s", url)
+            fb_status, fb_reason = _requests_fallback(url)
+            log.info("   Requests fallback: %s — %s", fb_status, fb_reason)
+            if fb_status == "Active":
+                return {"status": "Active", "title": tf or tc,
+                        "notes": f"{combined_notes} | requests: {fb_reason}",
+                        "verified": "requests fallback", "method": "requests"}
+            combined_notes = f"{combined_notes} | requests: {fb_reason}"
         return {"status": "Inactive", "title": tf or tc,
                 "notes": combined_notes,
                 "verified": "Both browsers confirmed", "method": "Chrome + Firefox"}
 
-    # Chrome Error (driver crash) or Firefox disabled
+    # Chrome Inactive but Firefox disabled — try requests fallback for network errors
+    if sc == "Inactive" and _is_network_level_failure(mc):
+        log.info("   Chrome network failure, Firefox disabled — trying requests fallback: %s", url)
+        fb_status, fb_reason = _requests_fallback(url)
+        log.info("   Requests fallback: %s — %s", fb_status, fb_reason)
+        if fb_status == "Active":
+            return {"status": "Active", "title": tc,
+                    "notes": f"Chrome: {mc} | requests: {fb_reason}",
+                    "verified": "requests fallback", "method": "requests"}
+        return {"status": "Inactive", "title": tc,
+                "notes": f"Chrome: {mc} | requests: {fb_reason}",
+                "verified": "Chrome + requests", "method": "Chrome"}
+
+    # Chrome Error (driver crash) or Firefox disabled with non-network failure
     return {"status": sc if sc == "Inactive" else "Inactive",
             "title": tc, "notes": mc,
             "verified": "Chrome only", "method": "Chrome"}
